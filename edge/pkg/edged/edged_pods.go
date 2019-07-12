@@ -31,11 +31,20 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+        "sort"
 	"strings"
+
+	"github.com/kubeedge/kubeedge/edge/pkg/edged/util/record"
 
 	"github.com/kubeedge/beehive/pkg/common/log"
 
 	"github.com/golang/glog"
+	"k8s.io/klog"
+	"k8s.io/kubernetes/pkg/api/v1/resource"
+	"k8s.io/kubernetes/third_party/forked/golang/expansion"
+	"k8s.io/kubernetes/pkg/fieldpath"
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
+	podshelper "k8s.io/kubernetes/pkg/apis/core/pods"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
@@ -573,11 +582,11 @@ func (e *edged) GenerateRunContainerOptions(pod *v1.Pod, container *v1.Container
 		opts.Devices = append(opts.Devices, blkVolumes...)
 	}
 
-	/*envs, err := e.makeEnvironmentVariables(pod, container, podIP)
+	envs, err := e.makeEnvironmentVariables(pod, container, podIP)
 	if err != nil {
 		return nil, nil, err
 	}
-	opts.Envs = append(opts.Envs, envs...)*/
+	opts.Envs = append(opts.Envs, envs...)
 
 	mounts, err := makeMounts(pod, e.getPodDir(pod.UID), container, hostname, hostDomainName, podIP, volumes)
 	if err != nil {
@@ -608,10 +617,10 @@ func (e *edged) GetPodDNS(pod *v1.Pod) (*runtimeapi.DNSConfig, error) {
 }
 
 // Make the environment variables for a pod in the given namespace.
-/*func (e *edged) makeEnvironmentVariables(pod *v1.Pod, container *v1.Container, podIP string) ([]kubecontainer.EnvVar, error) {
-	if pod.Spec.EnableServiceLinks == nil {
+func (e *edged) makeEnvironmentVariables(pod *v1.Pod, container *v1.Container, podIP string) ([]kubecontainer.EnvVar, error) {
+	/*if pod.Spec.EnableServiceLinks == nil {
 		return nil, fmt.Errorf("nil pod.spec.enableServiceLinks encountered, cannot construct envvars")
-	}
+	}*/
 
 	var result []kubecontainer.EnvVar
 	// Note:  These are added to the docker Config, but are not included in the checksum computed
@@ -623,10 +632,10 @@ func (e *edged) GetPodDNS(pod *v1.Pod) (*runtimeapi.DNSConfig, error) {
 	// To avoid this users can: (1) wait between starting a service and starting; or (2) detect
 	// missing service env var and exit and be restarted; or (3) use DNS instead of env vars
 	// and keep trying to resolve the DNS name of the service (recommended).
-	serviceEnv, err := e.getServiceEnvVarMap(pod.Namespace, *pod.Spec.EnableServiceLinks)
+	/*serviceEnv, err := e.getServiceEnvVarMap(pod.Namespace, *pod.Spec.EnableServiceLinks)
 	if err != nil {
 		return result, err
-	}
+	}*/
 
 	var (
 		configMaps = make(map[string]*v1.ConfigMap)
@@ -636,6 +645,9 @@ func (e *edged) GetPodDNS(pod *v1.Pod) (*runtimeapi.DNSConfig, error) {
 
 	// Env will override EnvFrom variables.
 	// Process EnvFrom first then allow Env to replace existing values.
+	var err error
+        recorder := record.NewEventRecorder()
+
 	for _, envFrom := range container.EnvFrom {
 		switch {
 		case envFrom.ConfigMapRef != nil:
@@ -647,15 +659,19 @@ func (e *edged) GetPodDNS(pod *v1.Pod) (*runtimeapi.DNSConfig, error) {
 					return result, fmt.Errorf("Couldn't get configMap %v/%v, no kubeClient defined", pod.Namespace, name)
 				}
 				optional := cm.Optional != nil && *cm.Optional
-				configMap, err = e.configMapManager.GetConfigMap(pod.Namespace, name)
-				if err != nil {
-					if errors.IsNotFound(err) && optional {
+				//configMap, err = e.configMapManager.GetConfigMap(pod.Namespace, name)
+				configMap, exists, _ := e.configMapStore.GetByKey(name)
+				//if err != nil {
+				//	if errors.IsNotFound(err) && optional {
+				if !exists {
+                                        if optional {
 						// ignore error when marked optional
 						continue
 					}
 					return result, err
 				}
-				configMaps[name] = configMap
+				//configMaps[name] = configMap
+				configMaps[name] = configMap.(*v1.ConfigMap)
 			}
 
 			invalidKeys := []string{}
@@ -671,7 +687,8 @@ func (e *edged) GetPodDNS(pod *v1.Pod) (*runtimeapi.DNSConfig, error) {
 			}
 			if len(invalidKeys) > 0 {
 				sort.Strings(invalidKeys)
-				e.recorder.Eventf(pod, v1.EventTypeWarning, "InvalidEnvironmentVariableNames", "Keys [%s] from the EnvFrom configMap %s/%s were skipped since they are considered invalid environment variable names.", strings.Join(invalidKeys, ", "), pod.Namespace, name)
+				//e.recorder.Eventf(pod, v1.EventTypeWarning, "InvalidEnvironmentVariableNames", "Keys [%s] from the EnvFrom configMap %s/%s were skipped since they are considered invalid environment variable names.", strings.Join(invalidKeys, ", "), pod.Namespace, name)
+				recorder.Eventf(pod, v1.EventTypeWarning, "InvalidEnvironmentVariableNames", "Keys [%s] from the EnvFrom configMap %s/%s were skipped since they are considered invalid environment variable names.", strings.Join(invalidKeys, ", "), pod.Namespace, name)
 			}
 		case envFrom.SecretRef != nil:
 			s := envFrom.SecretRef
@@ -682,15 +699,19 @@ func (e *edged) GetPodDNS(pod *v1.Pod) (*runtimeapi.DNSConfig, error) {
 					return result, fmt.Errorf("Couldn't get secret %v/%v, no kubeClient defined", pod.Namespace, name)
 				}
 				optional := s.Optional != nil && *s.Optional
-				secret, err = e.secretManager.GetSecret(pod.Namespace, name)
-				if err != nil {
-					if errors.IsNotFound(err) && optional {
+				//secret, err = e.secretManager.GetSecret(pod.Namespace, name)
+				secret, exists, err := e.secretStore.GetByKey(name)
+				//if err != nil {
+				//	if errors.IsNotFound(err) && optional {
+				if !exists {
+                                        if optional {
 						// ignore error when marked optional
 						continue
 					}
 					return result, err
 				}
-				secrets[name] = secret
+				//secrets[name] = secret
+				secrets[name] = secret.(*v1.Secret)
 			}
 
 			invalidKeys := []string{}
@@ -706,7 +727,8 @@ func (e *edged) GetPodDNS(pod *v1.Pod) (*runtimeapi.DNSConfig, error) {
 			}
 			if len(invalidKeys) > 0 {
 				sort.Strings(invalidKeys)
-				e.recorder.Eventf(pod, v1.EventTypeWarning, "InvalidEnvironmentVariableNames", "Keys [%s] from the EnvFrom secret %s/%s were skipped since they are considered invalid environment variable names.", strings.Join(invalidKeys, ", "), pod.Namespace, name)
+				//e.recorder.Eventf(pod, v1.EventTypeWarning, "InvalidEnvironmentVariableNames", "Keys [%s] from the EnvFrom secret %s/%s were skipped since they are considered invalid environment variable names.", strings.Join(invalidKeys, ", "), pod.Namespace, name)
+				recorder.Eventf(pod, v1.EventTypeWarning, "InvalidEnvironmentVariableNames", "Keys [%s] from the EnvFrom secret %s/%s were skipped since they are considered invalid environment variable names.", strings.Join(invalidKeys, ", "), pod.Namespace, name)
 			}
 		}
 	}
@@ -721,7 +743,8 @@ func (e *edged) GetPodDNS(pod *v1.Pod) (*runtimeapi.DNSConfig, error) {
 	// 2.  Create the container's environment in the order variables are declared
 	// 3.  Add remaining service environment vars
 	var (
-		mappingFunc = expansion.MappingFuncFor(tmpEnv, serviceEnv)
+		//mappingFunc = expansion.MappingFuncFor(tmpEnv, serviceEnv)
+		mappingFunc = expansion.MappingFuncFor(tmpEnv)
 	)
 	for _, envVar := range container.Env {
 		runtimeVal := envVar.Value
@@ -755,15 +778,19 @@ func (e *edged) GetPodDNS(pod *v1.Pod) (*runtimeapi.DNSConfig, error) {
 					if e.kubeClient == nil {
 						return result, fmt.Errorf("Couldn't get configMap %v/%v, no kubeClient defined", pod.Namespace, name)
 					}
-					configMap, err = e.configMapManager.GetConfigMap(pod.Namespace, name)
-					if err != nil {
-						if errors.IsNotFound(err) && optional {
+					//configMap, err = e.configMapManager.GetConfigMap(pod.Namespace, name)
+					configMap, exists, err := e.configMapStore.GetByKey(name)
+					//if err != nil {
+					//	if errors.IsNotFound(err) && optional {
+					if !exists {
+                                                if optional {
 							// ignore error when marked optional
 							continue
 						}
 						return result, err
 					}
-					configMaps[name] = configMap
+					//configMaps[name] = configMap
+					configMaps[name] = configMap.(*v1.ConfigMap)
 				}
 				runtimeVal, ok = configMap.Data[key]
 				if !ok {
@@ -782,15 +809,19 @@ func (e *edged) GetPodDNS(pod *v1.Pod) (*runtimeapi.DNSConfig, error) {
 					if e.kubeClient == nil {
 						return result, fmt.Errorf("Couldn't get secret %v/%v, no kubeClient defined", pod.Namespace, name)
 					}
-					secret, err = e.secretManager.GetSecret(pod.Namespace, name)
-					if err != nil {
-						if errors.IsNotFound(err) && optional {
+					//secret, err = e.secretManager.GetSecret(pod.Namespace, name)
+					secret, exists,  err := e.secretStore.GetByKey(name)
+					//if err != nil {
+					//	if errors.IsNotFound(err) && optional {
+					if !exists {
+                                                if optional {
 							// ignore error when marked optional
 							continue
 						}
 						return result, err
 					}
-					secrets[name] = secret
+					//secrets[name] = secret
+					secrets[name] = secret.(*v1.Secret)
 				}
 				runtimeValBytes, ok := secret.Data[key]
 				if !ok {
@@ -807,7 +838,7 @@ func (e *edged) GetPodDNS(pod *v1.Pod) (*runtimeapi.DNSConfig, error) {
 		// it, we delete the key from the kubelet-generated ones so we don't have duplicate
 		// env vars.
 		// TODO: remove this next line once all platforms use apiserver+Pods.
-		delete(serviceEnv, envVar.Name)
+		//delete(serviceEnv, envVar.Name)
 
 		tmpEnv[envVar.Name] = runtimeVal
 	}
@@ -818,7 +849,7 @@ func (e *edged) GetPodDNS(pod *v1.Pod) (*runtimeapi.DNSConfig, error) {
 	}
 
 	// Append remaining service env vars.
-	for k, v := range serviceEnv {
+	/*for k, v := range serviceEnv {
 		// Accesses apiserver+Pods.
 		// So, the master may set service env vars, or kubelet may.  In case both are doing
 		// it, we skip the key from the kubelet-generated ones so we don't have duplicate
@@ -827,9 +858,74 @@ func (e *edged) GetPodDNS(pod *v1.Pod) (*runtimeapi.DNSConfig, error) {
 		if _, present := tmpEnv[k]; !present {
 			result = append(result, kubecontainer.EnvVar{Name: k, Value: v})
 		}
-	}
+	}*/
 	return result, nil
-}*/
+}
+
+// podFieldSelectorRuntimeValue returns the runtime value of the given
+// selector for a pod.
+func (e *edged) podFieldSelectorRuntimeValue(fs *v1.ObjectFieldSelector, pod *v1.Pod, podIP string) (string, error) {
+        internalFieldPath, _, err := podshelper.ConvertDownwardAPIFieldLabel(fs.APIVersion, fs.FieldPath, "")
+        if err != nil {
+                return "", err
+        }
+        switch internalFieldPath {
+        case "spec.nodeName":
+                return pod.Spec.NodeName, nil
+        case "spec.serviceAccountName":
+                return pod.Spec.ServiceAccountName, nil
+        case "status.hostIP":
+                hostIP, err := e.getHostIPAnyWay()
+                if err != nil {
+                        return "", err
+                }
+                return hostIP, nil
+        case "status.podIP":
+                return podIP, nil
+        }
+        return fieldpath.ExtractFieldPathAsString(pod, internalFieldPath)
+}
+
+// defaultPodLimitsForDownwardAPI copies the input pod, and optional container,
+// and applies default resource limits. it returns a copy of the input pod,
+// and a copy of the input container (if specified) with default limits
+// applied. if a container has no limit specified, it will default the limit to
+// the node allocatable.
+// TODO: if/when we have pod level resources, we need to update this function
+// to use those limits instead of node allocatable.
+func (e *edged) defaultPodLimitsForDownwardAPI(pod *v1.Pod, container *v1.Container) (*v1.Pod, *v1.Container, error) {
+        if pod == nil {
+                return nil, nil, fmt.Errorf("invalid input, pod cannot be nil")
+        }
+
+        node, err := e.getNodeAnyWay()
+        if err != nil {
+                return nil, nil, fmt.Errorf("failed to find node object, expected a node")
+        }
+        allocatable := node.Status.Allocatable
+        klog.Infof("allocatable: %v", allocatable)
+        outputPod := pod.DeepCopy()
+        for idx := range outputPod.Spec.Containers {
+                resource.MergeContainerResourceLimits(&outputPod.Spec.Containers[idx], allocatable)
+        }
+
+        var outputContainer *v1.Container
+        if container != nil {
+                outputContainer = container.DeepCopy()
+                resource.MergeContainerResourceLimits(outputContainer, allocatable)
+        }
+        return outputPod, outputContainer, nil
+}
+
+// containerResourceRuntimeValue returns the value of the provided container resource
+func containerResourceRuntimeValue(fs *v1.ResourceFieldSelector, pod *v1.Pod, container *v1.Container) (string, error) {
+        containerName := fs.ContainerName
+        if len(containerName) == 0 {
+                return resource.ExtractContainerResourceValue(fs, container)
+        }
+        return resource.ExtractResourceValueByContainerName(fs, pod, containerName)
+}
+
 
 // makeBlockVolumes maps the raw block devices specified in the path of the container
 // Experimental

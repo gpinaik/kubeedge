@@ -182,3 +182,18 @@ func (e *edged) GetExtraSupplementalGroupsForPod(pod *v1.Pod) []int64 {
 func (e *edged) getPodContainerDir(podUID types.UID, ctrName string) string {
 	return filepath.Join(e.getPodDir(podUID), config.DefaultKubeletContainersDirName, ctrName)
 }
+
+// getNodeAnyWay() must return a *v1.Node which is required by RunGeneralPredicates().
+// The *v1.Node is obtained as follows:
+// Return kubelet's nodeInfo for this node, except on error or if in standalone mode,
+// in which case return a manufactured nodeInfo representing a node with no pods,
+// zero capacity, and the default labels.
+func (e *edged) getNodeAnyWay() (*v1.Node, error) {
+	return e.initialNode()
+}
+
+// getHostIPAnyway attempts to return the host IP from kubelet's nodeInfo, or
+// the initialNode.
+func (e *edged) getHostIPAnyWay() (string, error) {
+	return e.getIP()
+}
